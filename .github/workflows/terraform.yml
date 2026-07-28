@@ -1,0 +1,236 @@
+name: Terraform
+
+# plan sur pull request, apply sur main, authentification OIDC
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# le state est partage : on serialise sans annuler un apply en cours
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.15.8"
+  PYTHON_VERSION: "3.13"
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+  TF_IN_AUTOMATION: "true"
+  # terraform.tfvars n'est pas versionne : sans ca la ci detruirait son propre role
+  TF_VAR_github_repository: ${{ github.repository }}
+  TF_VAR_create_github_oidc_provider: ${{ vars.CREATE_OIDC_PROVIDER || 'true' }}
+
+jobs:
+  # tourne toujours, meme sans acces AWS ; verrouille l'apply
+  controles:
+    name: Controles statiques
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Compiler les sources Python
+        run: python -m compileall -q scripts lambdas tools
+
+      # un desaccord ne casse rien visiblement mais degrade les predictions
+      - name: Verifier la coherence de la taille d'image
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          features = pathlib.Path("scripts/features.py").read_text()
+          taille_code = int(re.search(r"^IMAGE_SIZE\s*=\s*(\d+)", features, re.M).group(1))
+
+          variables = pathlib.Path("terraform/variables.tf").read_text()
+          bloc = re.search(r'variable "image_size".*?\n}', variables, re.S).group(0)
+          taille_tf = int(re.search(r"default\s*=\s*(\d+)", bloc).group(1))
+
+          if taille_code != taille_tf:
+              sys.exit(
+                  f"IMAGE_SIZE vaut {taille_code} dans scripts/features.py "
+                  f"mais {taille_tf} dans terraform/variables.tf."
+              )
+          print(f"IMAGE_SIZE coherent : {taille_code}")
+          PY
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform -chdir=terraform fmt -check -recursive -diff
+
+      - name: Valider la definition de la machine d'etat
+        run: python -c "import json; json.load(open('statemachine/ml_pipeline.asl.json'))"
+
+  # analyse statique ; ne verrouille rien pour ne pas bloquer un deploiement
+  securite:
+    name: Analyse statique
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.64.0
+
+      - name: tflint
+        run: |
+          tflint --chdir=terraform --init
+          tflint --chdir=terraform --format compact
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # soft-fail : les alertes restantes sont des compromis assumes, cf. le dossier
+      - name: checkov
+        run: |
+          pip install --quiet checkov
+          checkov -d terraform --framework terraform --compact --quiet --soft-fail
+
+  plan:
+    name: Plan
+    if: github.event_name == 'pull_request' && vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: lambdas/*/requirements.txt
+
+      # sans les archives, archive_file echoue et le plan n'est pas evaluable
+      - name: Construire les paquets Lambda
+        run: ./tools/build_lambdas.sh
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-plan-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform -chdir=terraform init -input=false
+
+      - name: terraform validate
+        run: terraform -chdir=terraform validate
+
+      - name: terraform plan
+        # sans pipefail, l'echec de terraform serait masque par la reussite de tee
+        run: |
+          set -o pipefail
+          terraform -chdir=terraform plan -input=false -no-color -out=tfplan | tee plan.txt
+
+      - name: Publier le plan en commentaire
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('plan.txt', 'utf8');
+            // limite de 65 536 caracteres ; on garde la fin, avec le recapitulatif
+            const limite = 60000;
+            if (plan.length > limite) {
+              plan = '[...tronque...]\n' + plan.slice(-limite);
+            }
+            const marqueur = '### Plan Terraform';
+            const corps = [
+              marqueur,
+              '',
+              '<details><summary>Deplier</summary>',
+              '',
+              '```terraform',
+              plan,
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+
+            // un seul commentaire, mis a jour a chaque pousse
+            const { data: commentaires } = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: context.issue.number,
+            });
+            const existant = commentaires.find(
+              (c) => c.user.type === 'Bot' && c.body.startsWith(marqueur)
+            );
+            if (existant) {
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: existant.id,
+                body: corps,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.issue.number,
+                body: corps,
+              });
+            }
+
+  apply:
+    name: Apply
+    needs: controles
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    # une regle de protection sur cet environnement permet d'exiger une validation
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: lambdas/*/requirements.txt
+
+      - name: Construire les paquets Lambda
+        run: ./tools/build_lambdas.sh
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-apply-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform -chdir=terraform init -input=false
+
+      # replanifie ici : le state a pu bouger entre la pull request et la fusion
+      - name: terraform apply
+        run: terraform -chdir=terraform apply -input=false -auto-approve
+
+      - name: Recapitulatif
+        run: |
+          {
+            echo '### Sorties Terraform'
+            echo '```'
+            terraform -chdir=terraform output
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

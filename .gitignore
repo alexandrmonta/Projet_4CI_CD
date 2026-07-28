@@ -1,0 +1,34 @@
+# python
+.venv/
+__pycache__/
+*.py[cod]
+
+# archives lambda, reproduites par tools/build_lambdas.sh
+build/
+
+# terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+terraform.tfvars
+*.tfvars
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+tfplan
+*.tfplan
+
+# notes de travail, pas des livrables
+ANTISECHE.md
+AVANCEMENT.md
+
+# sorties locales
+/data/
+/output/
+model.tar.gz
+
+.DS_Store

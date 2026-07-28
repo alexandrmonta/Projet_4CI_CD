@@ -1,0 +1,12 @@
+# Copier en terraform.tfvars. Tout a une valeur par defaut, le fichier est facultatif.
+
+region       = "eu-central-1"
+bucket       = "projet-terraform"
+project_name = "comics-manga"
+
+training_instance_type = "ml.t3.medium"
+endpoint_instance_type = "ml.t2.medium"
+
+import_existing_resources = true
+
+# github_repository = "proprietaire/depot"

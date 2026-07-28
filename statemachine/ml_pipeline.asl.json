@@ -1,0 +1,428 @@
+{
+  "Comment": "Classification comics / manga : pretraitement, entrainement, endpoint, inference, suppression de l'endpoint.",
+  "QueryLanguage": "JSONata",
+  "StartAt": "PrepareDataset",
+  "States": {
+    "PrepareDataset": {
+      "Type": "Task",
+      "Comment": "Recense les images et fabrique les noms de ressources.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${process_image_arn}",
+        "Payload": {
+          "action": "plan",
+          "bucket": "${bucket}",
+          "run_id": "{% $exists($states.input.run_id) ? $states.input.run_id : '' %}"
+        }
+      },
+      "Assign": {
+        "plan": "{% $states.result.Payload %}",
+        "failure": null,
+        "inference": null,
+        "endpoint_polls": 0
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PipelineFailed",
+          "Output": "{% { 'stage': 'PrepareDataset', 'error': $states.errorOutput } %}"
+        }
+      ],
+      "Next": "ResizeImages"
+    },
+
+    "ResizeImages": {
+      "Type": "Map",
+      "Comment": "Redimensionne en 64x64 PNG, les 4 lots en parallele.",
+      "Items": "{% $plan.shards %}",
+      "MaxConcurrency": 4,
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "ResizeShard",
+        "States": {
+          "ResizeShard": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "${process_image_arn}",
+              "Payload": "{% $merge([$states.input, { 'action': 'resize' }]) %}"
+            },
+            "Output": "{% $states.result.Payload %}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "Output": "{% { 'run_id': $plan.run_id, 'shards': $states.result } %}",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PipelineFailed",
+          "Output": "{% { 'stage': 'ResizeImages', 'error': $states.errorOutput } %}"
+        }
+      ],
+      "Next": "TrainModel"
+    },
+
+    "TrainModel": {
+      "Type": "Task",
+      "Comment": "Processing job : le compte n'a aucun quota de training job.",
+      "Resource": "arn:aws:states:::sagemaker:createProcessingJob.sync",
+      "Arguments": {
+        "ProcessingJobName": "{% $plan.processing_job_name %}",
+        "RoleArn": "${sagemaker_role_arn}",
+        "AppSpecification": {
+          "ImageUri": "${training_image}",
+          "ContainerEntrypoint": ["python3", "/opt/ml/processing/input/code/train.py"],
+          "ContainerArguments": [
+            "--train",
+            "/opt/ml/processing/input/train",
+            "--model-dir",
+            "/tmp/model",
+            "--archive-dir",
+            "/opt/ml/processing/model",
+            "--output-data-dir",
+            "/opt/ml/processing/report",
+            "--code-dir",
+            "/opt/ml/processing/input/code"
+          ]
+        },
+        "ProcessingResources": {
+          "ClusterConfig": {
+            "InstanceCount": 1,
+            "InstanceType": "${training_instance_type}",
+            "VolumeSizeInGB": 10
+          }
+        },
+        "StoppingCondition": {
+          "MaxRuntimeInSeconds": 1800
+        },
+        "ProcessingInputs": [
+          {
+            "InputName": "code",
+            "S3Input": {
+              "S3Uri": "{% $plan.code_s3_uri %}",
+              "LocalPath": "/opt/ml/processing/input/code",
+              "S3DataType": "S3Prefix",
+              "S3InputMode": "File",
+              "S3DataDistributionType": "FullyReplicated"
+            }
+          },
+          {
+            "InputName": "train",
+            "S3Input": {
+              "S3Uri": "{% $plan.train_s3_uri %}",
+              "LocalPath": "/opt/ml/processing/input/train",
+              "S3DataType": "S3Prefix",
+              "S3InputMode": "File",
+              "S3DataDistributionType": "FullyReplicated"
+            }
+          }
+        ],
+        "ProcessingOutputConfig": {
+          "Outputs": [
+            {
+              "OutputName": "model",
+              "S3Output": {
+                "S3Uri": "{% $plan.model_output_s3_uri %}",
+                "LocalPath": "/opt/ml/processing/model",
+                "S3UploadMode": "EndOfJob"
+              }
+            },
+            {
+              "OutputName": "report",
+              "S3Output": {
+                "S3Uri": "{% $plan.model_output_s3_uri & 'report/' %}",
+                "LocalPath": "/opt/ml/processing/report",
+                "S3UploadMode": "EndOfJob"
+              }
+            }
+          ]
+        }
+      },
+      "Output": "{% { 'run_id': $plan.run_id, 'processing_job_arn': $states.result.ProcessingJobArn } %}",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PipelineFailed",
+          "Output": "{% { 'stage': 'TrainModel', 'error': $states.errorOutput } %}"
+        }
+      ],
+      "Next": "CreateModel"
+    },
+
+    "CreateModel": {
+      "Type": "Task",
+      "Comment": "Le code d'inference est embarque dans model.tar.gz sous code/.",
+      "Resource": "arn:aws:states:::sagemaker:createModel",
+      "Arguments": {
+        "ModelName": "{% $plan.model_name %}",
+        "ExecutionRoleArn": "${sagemaker_role_arn}",
+        "PrimaryContainer": {
+          "Image": "${training_image}",
+          "ModelDataUrl": "{% $plan.model_artifact_s3_uri %}",
+          "Environment": {
+            "SAGEMAKER_PROGRAM": "inference.py",
+            "SAGEMAKER_SUBMIT_DIRECTORY": "/opt/ml/model/code",
+            "SAGEMAKER_REGION": "${region}",
+            "SAGEMAKER_CONTAINER_LOG_LEVEL": "20"
+          }
+        }
+      },
+      "Output": "{% { 'run_id': $plan.run_id } %}",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PipelineFailed",
+          "Output": "{% { 'stage': 'CreateModel', 'error': $states.errorOutput } %}"
+        }
+      ],
+      "Next": "CreateEndpointConfig"
+    },
+
+    "CreateEndpointConfig": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sagemaker:createEndpointConfig",
+      "Arguments": {
+        "EndpointConfigName": "{% $plan.endpoint_config_name %}",
+        "ProductionVariants": [
+          {
+            "VariantName": "AllTraffic",
+            "ModelName": "{% $plan.model_name %}",
+            "InitialInstanceCount": 1,
+            "InstanceType": "${endpoint_instance_type}",
+            "InitialVariantWeight": 1
+          }
+        ]
+      },
+      "Output": "{% { 'run_id': $plan.run_id } %}",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PipelineFailed",
+          "Output": "{% { 'stage': 'CreateEndpointConfig', 'error': $states.errorOutput } %}"
+        }
+      ],
+      "Next": "CreateEndpoint"
+    },
+
+    "CreateEndpoint": {
+      "Type": "Task",
+      "Comment": "A partir d'ici l'endpoint est facture. createEndpoint n'a pas de variante .sync.",
+      "Resource": "arn:aws:states:::sagemaker:createEndpoint",
+      "Arguments": {
+        "EndpointName": "{% $plan.endpoint_name %}",
+        "EndpointConfigName": "{% $plan.endpoint_config_name %}"
+      },
+      "Output": "{% { 'run_id': $plan.run_id } %}",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "DeleteEndpoint",
+          "Assign": {
+            "failure": "{% { 'stage': 'CreateEndpoint', 'error': $states.errorOutput } %}"
+          }
+        }
+      ],
+      "Next": "WaitForEndpoint"
+    },
+
+    "WaitForEndpoint": {
+      "Type": "Wait",
+      "Comment": "Cinq a dix minutes pour passer InService.",
+      "Seconds": 30,
+      "Next": "DescribeEndpoint"
+    },
+
+    "DescribeEndpoint": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:sagemaker:describeEndpoint",
+      "Arguments": {
+        "EndpointName": "{% $plan.endpoint_name %}"
+      },
+      "Assign": {
+        "endpoint_polls": "{% $endpoint_polls + 1 %}"
+      },
+      "Output": "{% { 'run_id': $plan.run_id, 'status': $states.result.EndpointStatus } %}",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "EndpointFailed",
+          "Output": "{% { 'status': 'Indeterminable' } %}"
+        }
+      ],
+      "Next": "IsEndpointReady"
+    },
+
+    "IsEndpointReady": {
+      "Type": "Choice",
+      "Comment": "Borne a 40 sondages, soit 20 minutes.",
+      "Choices": [
+        {
+          "Condition": "{% $states.input.status = 'InService' %}",
+          "Next": "RunInference"
+        },
+        {
+          "Condition": "{% $states.input.status in ['Failed', 'OutOfService', 'RollingBack'] or $endpoint_polls >= 40 %}",
+          "Next": "EndpointFailed"
+        }
+      ],
+      "Default": "WaitForEndpoint"
+    },
+
+    "EndpointFailed": {
+      "Type": "Pass",
+      "Comment": "Enregistre la cause puis rejoint le nettoyage.",
+      "Assign": {
+        "failure": "{% { 'stage': 'CreateEndpoint', 'error': 'Endpoint non disponible, dernier etat observe : ' & $states.input.status } %}"
+      },
+      "Output": "{% { 'run_id': $plan.run_id } %}",
+      "Next": "DeleteEndpoint"
+    },
+
+    "RunInference": {
+      "Type": "Task",
+      "Comment": "Inference puis ecriture de output/<run_id>/.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${run_inference_arn}",
+        "Payload": {
+          "bucket": "${bucket}",
+          "run_id": "{% $plan.run_id %}",
+          "endpoint_name": "{% $plan.endpoint_name %}",
+          "test_prefix": "{% $plan.test_prefix %}",
+          "output_prefix": "{% $plan.output_prefix %}",
+          "classes": "{% $plan.classes %}"
+        }
+      },
+      "Assign": {
+        "inference": "{% $states.result.Payload %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "DeleteEndpoint",
+          "Assign": {
+            "failure": "{% { 'stage': 'RunInference', 'error': $states.errorOutput } %}"
+          }
+        }
+      ],
+      "Next": "DeleteEndpoint"
+    },
+
+    "DeleteEndpoint": {
+      "Type": "Task",
+      "Comment": "Atteint aussi par les Catch : l'endpoint est supprime meme en cas d'echec.",
+      "Resource": "arn:aws:states:::aws-sdk:sagemaker:deleteEndpoint",
+      "Arguments": {
+        "EndpointName": "{% $plan.endpoint_name %}"
+      },
+      "Output": "{% { 'run_id': $plan.run_id } %}",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Comment": "Un endpoint en Creating refuse d'etre supprime : il faut insister.",
+          "IntervalSeconds": 60,
+          "MaxAttempts": 20,
+          "BackoffRate": 1
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "DeleteEndpointConfig",
+          "Comment": "Un endpoint absent n'est pas une erreur.",
+          "Output": "{% { 'run_id': $plan.run_id } %}"
+        }
+      ],
+      "Next": "DeleteEndpointConfig"
+    },
+
+    "DeleteEndpointConfig": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:sagemaker:deleteEndpointConfig",
+      "Arguments": {
+        "EndpointConfigName": "{% $plan.endpoint_config_name %}"
+      },
+      "Output": "{% { 'run_id': $plan.run_id } %}",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "CheckFailure",
+          "Output": "{% { 'run_id': $plan.run_id } %}"
+        }
+      ],
+      "Next": "CheckFailure"
+    },
+
+    "CheckFailure": {
+      "Type": "Choice",
+      "Comment": "Le nettoyage etant fait, on distingue le succes de l'echec differe.",
+      "Choices": [
+        {
+          "Condition": "{% $failure != null %}",
+          "Next": "PipelineFailed"
+        }
+      ],
+      "Default": "PipelineSucceeded"
+    },
+
+    "PipelineSucceeded": {
+      "Type": "Succeed",
+      "Output": "{% { 'run_id': $plan.run_id, 'images': $inference.images, 'accuracy': $inference.accuracy, 'balanced_accuracy': $inference.balanced_accuracy, 'outputs': $inference.outputs, 'model': $plan.model_artifact_s3_uri, 'endpoint_deleted': true } %}"
+    },
+
+    "PipelineFailed": {
+      "Type": "Fail",
+      "Error": "PipelineFailed",
+      "Cause": "Le pipeline a echoue. Voir l'historique d'execution pour l'etape en cause ; l'endpoint a ete supprime s'il avait ete cree."
+    }
+  }
+}
