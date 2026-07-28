@@ -22,10 +22,6 @@ override.tf.json
 tfplan
 *.tfplan
 
-# notes de travail, pas des livrables
-ANTISECHE.md
-AVANCEMENT.md
-
 # sorties locales
 /data/
 /output/
