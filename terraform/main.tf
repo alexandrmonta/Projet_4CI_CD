@@ -76,6 +76,7 @@ resource "aws_lambda_function" "process_image" {
     variables = {
       IMAGE_SIZE  = tostring(var.image_size)
       MAX_WORKERS = "16"
+      DEMO        = "soutenance"
     }
   }
 }
@@ -155,6 +156,14 @@ import {
 
 locals {
   github_enabled = var.github_repository != ""
+
+  # github insere depuis peu les identifiants numeriques du proprietaire et du
+  # depot dans le claim sub : on accepte l'ancien et le nouveau format
+  github_parts = split("/", var.github_repository)
+  github_subs = [
+    "repo:${var.github_repository}:*",
+    "repo:${local.github_parts[0]}@*/${try(local.github_parts[1], "")}@*:*",
+  ]
   github_oidc_arn = var.create_github_oidc_provider && local.github_enabled ? one(aws_iam_openid_connect_provider.github[*].arn) : (
     "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
   )
@@ -181,7 +190,7 @@ resource "aws_iam_role" "github" {
       Principal = { Federated = local.github_oidc_arn }
       Condition = {
         StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
-        StringLike   = { "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:*" }
+        StringLike   = { "token.actions.githubusercontent.com:sub" = local.github_subs }
       }
     }]
   })
