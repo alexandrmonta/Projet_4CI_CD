@@ -43,12 +43,12 @@ variable "lambda_runtime" {
 # couche managee AWS SDK for pandas ; version non listable, a fixer a la main
 variable "pandas_layer_version" {
   type    = number
-  default = 14
+  default = 30
 }
 
 variable "log_retention_days" {
   type    = number
-  default = 14
+  default = 30
 }
 
 # reprend la state machine et la lambda creees a la console ; false sur un compte vierge
