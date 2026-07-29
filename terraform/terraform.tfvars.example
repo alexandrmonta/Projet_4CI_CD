@@ -1,4 +1,4 @@
-# Copier en terraform.tfvars. Tout a une valeur par defaut, le fichier est facultatif.
+# copier en terraform.tfvars. Tout a une valeur par defaut
 
 region       = "eu-central-1"
 bucket       = "projet-terraform"

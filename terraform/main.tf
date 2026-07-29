@@ -234,6 +234,3 @@ resource "aws_iam_role_policy" "github" {
 
 # ---------------------------------------------------------------- demo
 
-resource "aws_sqs_queue" "demo" {
-  name = "comics-manga-demo"
-}

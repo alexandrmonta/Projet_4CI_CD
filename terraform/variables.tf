@@ -40,7 +40,7 @@ variable "lambda_runtime" {
   default = "python3.13"
 }
 
-# couche managee AWS SDK for pandas ; version non listable, a fixer a la main
+# couche managee AWS SDK for pandas 
 variable "pandas_layer_version" {
   type    = number
   default = 14
