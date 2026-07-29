@@ -28,3 +28,6 @@ tfplan
 model.tar.gz
 
 .DS_Store
+
+# fichiers temporaires office
+~$*
