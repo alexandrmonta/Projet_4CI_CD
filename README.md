@@ -7,8 +7,7 @@ classifieur sur SageMaker, le déploie derrière un endpoint, prédit la classe 
 images de test, écrit les résultats, puis supprime l'endpoint. Le tout est
 orchestré par Step Functions, décrit en Terraform et déployé par GitHub Actions.
 
-AWS plutôt qu'Azure : le sujet prévoit un bonus pour un fournisseur non vu en
-cours.
+AWS plutôt qu'Azure.
 
 ## Résultat
 
