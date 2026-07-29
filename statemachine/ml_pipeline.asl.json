@@ -96,7 +96,7 @@
 
     "TrainModel": {
       "Type": "Task",
-      "Comment": "Processing job : le compte n'a aucun quota de training job.",
+      "Comment": "Processing job : le quota de training job est arrive apres coup, on n'a pas rebascule.",
       "Resource": "arn:aws:states:::sagemaker:createProcessingJob.sync",
       "Arguments": {
         "ProcessingJobName": "{% $plan.processing_job_name %}",

@@ -24,7 +24,7 @@ variable "training_image" {
   default = "492215442770.dkr.ecr.eu-central-1.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
 }
 
-# processing job : le compte n'a aucun quota de training job
+# processing job : le quota de training job est arrive apres coup, on n'a pas rebascule
 variable "training_instance_type" {
   type    = string
   default = "ml.t3.medium"
