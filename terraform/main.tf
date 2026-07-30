@@ -79,7 +79,7 @@ resource "aws_lambda_function" "process_image" {
       MAX_WORKERS = "16"
     }
   }
-   tags = {
+  tags = {
     Project     = "lambda Tag"
     Environment = "production"
     ManagedBy   = "Terraform"
