@@ -76,7 +76,6 @@ resource "aws_lambda_function" "process_image" {
     variables = {
       IMAGE_SIZE  = tostring(var.image_size)
       MAX_WORKERS = "16"
-      DEMO        = "Hugo"
     }
   }
 }
