@@ -22,7 +22,6 @@ provider "aws" {
     tags = {
       Project   = var.project_name
       ManagedBy = "terraform"
-      Demo      = "soutenance"
     }
   }
 }
@@ -52,7 +51,6 @@ data "archive_file" "process_image" {
   type        = "zip"
   source_dir  = "${path.module}/../build/lambda/process_image"
   output_path = "${path.module}/../build/process_image.zip"
-
 }
 
 data "archive_file" "run_inference" {
@@ -79,11 +77,6 @@ resource "aws_lambda_function" "process_image" {
       IMAGE_SIZE  = tostring(var.image_size)
       MAX_WORKERS = "16"
     }
-  }
-  tags = {
-    Project     = "lambdaTag"
-    Environment = "production"
-    ManagedBy   = "Terraform"
   }
 }
 
@@ -238,4 +231,3 @@ resource "aws_iam_role_policy" "github" {
     }]
   })
 }
-
