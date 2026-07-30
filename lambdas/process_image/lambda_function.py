@@ -80,7 +80,7 @@ def _plan(event):
         "code_s3_uri": f"s3://{bucket}/scripts/",
         "model_output_s3_uri": f"s3://{bucket}/models/{run_id}/",
         "model_artifact_s3_uri": f"s3://{bucket}/models/{run_id}/model.tar.gz",
-        "output_prefix": f"output/{run_id}/",
+        "output_prefix": f"output/test_jury/{run_id}/",
         "processing_job_name": f"comics-manga-train-{run_id}",
         "model_name": f"comics-manga-{run_id}",
         "endpoint_config_name": f"comics-manga-cfg-{run_id}",
