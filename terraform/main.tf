@@ -22,6 +22,7 @@ provider "aws" {
     tags = {
       Project   = var.project_name
       ManagedBy = "terraform"
+      Demo      = "soutenance"
     }
   }
 }
@@ -51,7 +52,7 @@ data "archive_file" "process_image" {
   type        = "zip"
   source_dir  = "${path.module}/../build/lambda/process_image"
   output_path = "${path.module}/../build/process_image.zip"
-  
+
 }
 
 data "archive_file" "run_inference" {
