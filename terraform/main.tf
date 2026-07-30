@@ -80,7 +80,7 @@ resource "aws_lambda_function" "process_image" {
     }
   }
   tags = {
-    Project     = "lambda Tag"
+    Project     = "lambdaTag"
     Environment = "production"
     ManagedBy   = "Terraform"
   }
