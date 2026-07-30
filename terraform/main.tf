@@ -69,7 +69,7 @@ resource "aws_lambda_function" "process_image" {
   filename         = data.archive_file.process_image.output_path
   source_code_hash = data.archive_file.process_image.output_base64sha256
 
-  memory_size = 2048
+  memory_size = 3000
   timeout     = 900
 
   environment {
